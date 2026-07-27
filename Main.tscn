@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://d06ri083bkq6p"]
+
+[ext_resource type="Script" uid="uid://blertyta2i76x" path="res://RoverDrone.cs" id="1_script"]
+
+[node name="DoublePendulumTest" type="Node3D"]
+script = ExtResource("1_script")
