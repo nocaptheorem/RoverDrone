@@ -1,6 +1,7 @@
 using Godot;
-using System;
-using System.Collections.Generic;
+using System.Net.Sockets;
+using System.Text;
+using System.Text.Json;
 
 namespace VehicleDynamics
 {
@@ -94,17 +95,37 @@ namespace VehicleDynamics
     [Export] public float TetherRestLength = 5.0f;
     [Export] public int TetherSubSteps = 10;
 
+    // =========================================================================
+    // TELEMETRY & DIAGNOSTICS CONFIGURATION
+    // =========================================================================
+    [ExportGroup("Telemetry & Diagnostics")]
+    [Export] public bool EnableTelemetry = true;
+    [Export] public float TelemetryPrintRateHz = 10.0f; // High frequency for real-time plotting
+    [Export] public string UdpIp = "127.0.0.1";
+    [Export] public int UdpPort = 9870; // Dedicated UDP port for RoverDrone
+    [Export] public bool EnableAnomalyDetector = true;
+
+    private UdpClient _udpClient;
+    private float _telemetryTimer = 0.0f;
+    private float _lastUdpErrorTime = -10.0f;
+    private const float ERROR_LOG_INTERVAL_SEC = 2.0f;
+
+    // Last computed telemetry cache variables
+    private float _lastVertVelPidOut = 0.0f;
+    private float _lastPitchPidOut = 0.0f;
+    private float _lastRollPidOut = 0.0f;
+    private float _lastYawPidOut = 0.0f;
+
     // --- Core Systems State ---
     private RigidBody3D _chassis = null!;
     private Camera3D _camera = null!;
     private Node3D _camPivot = null!;
-    private Label _hud = null!;
+    private RichTextLabel _hud = null!;
     private List<GravityWell> _activeGravityWells = new List<GravityWell>();
     private RigidBody3D _gravityAnomaly = null!;
     private bool _spawnGravityAnomaly = false;
 
     // --- Visual Systems & Telemetry ---
-    private Label3D _spatialTelemetry = null!;
     private MeshInstance3D _gForcePendulum = null!;
     private Vector3 _lastVelocity = Vector3.Zero;
     private float _cameraFovBase = 75.0f;
@@ -299,6 +320,21 @@ namespace VehicleDynamics
       BuildChassis();
       InitializeHybridNodes();
       SetupCameraAndHUD();
+      InitTelemetrySocket();
+    }
+
+    private void InitTelemetrySocket()
+    {
+      if (!EnableTelemetry) return;
+
+      try
+      {
+        _udpClient = new UdpClient();
+      }
+      catch (Exception ex)
+      {
+        GD.PrintErr($"[TELEMETRY INIT ERROR] Failed to instantiate UdpClient: {ex.Message}");
+      }
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -315,6 +351,13 @@ namespace VehicleDynamics
 
       if (@event is InputEventMouseButton mb && mb.Pressed && Input.MouseMode == Input.MouseModeEnum.Visible)
         Input.MouseMode = Input.MouseModeEnum.Captured;
+    }
+
+    public override void _ExitTree()
+    {
+      _udpClient?.Close();
+      _udpClient?.Dispose();
+      _udpClient = null;
     }
 
     public override void _PhysicsProcess(double delta)
@@ -353,7 +396,122 @@ namespace VehicleDynamics
       UpdateCamera(dt);
       UpdateHUD();
 
+      if (EnableAnomalyDetector) DetectAnomalies();
+
+      if (EnableTelemetry)
+      {
+        _telemetryTimer += dt;
+        if (TelemetryPrintRateHz > 0 && _telemetryTimer >= (1.0f / TelemetryPrintRateHz))
+        {
+          LogTelemetry();
+          _telemetryTimer = 0.0f;
+        }
+      }
+
       _lastVelocity = _chassis.LinearVelocity;
+    }
+
+    // =========================================================================
+    // REAL-TIME ANOMALY DETECTOR
+    // =========================================================================
+    private void DetectAnomalies()
+    {
+      if (_chassis == null) return;
+
+      if (float.IsNaN(_chassis.Position.X) || float.IsInfinity(_chassis.Position.X))
+        GD.PrintErr("[ANOMALY] NaN or Infinity detected in Rover Chassis Position!");
+
+      if (float.IsNaN(_chassis.LinearVelocity.X) || float.IsInfinity(_chassis.LinearVelocity.X))
+        GD.PrintErr("[ANOMALY] NaN or Infinity detected in Rover Velocity!");
+
+      if (_fl.CurrentThrust > MaxMotorThrust * 1.5f)
+        GD.PrintErr($"[ANOMALY] Thruster Over-saturation detected on FL: {_fl.CurrentThrust:F1} N!");
+
+      if (_gravityMag > 200.0f)
+        GD.PrintErr($"[ANOMALY] Extreme Gravity Field Gradient detected: {_gravityMag:F1} m/s²!");
+    }
+
+    // =========================================================================
+    // TELEMETRY LOGGING (TIME-SERIES MAGNITUDE METRICS ONLY)
+    // =========================================================================
+    private void LogTelemetry()
+    {
+      if (_udpClient == null)
+      {
+        ReportTelemetryError("UdpClient is uninitialized or null.");
+        return;
+      }
+
+      Vector3 accel = (_chassis.LinearVelocity - _lastVelocity) / (1.0f / (float)Engine.PhysicsTicksPerSecond);
+
+      // Kept exclusively for PID error evaluation, excluded from UDP magnitude reporting
+      Vector3 localForward = _localReferenceFrame.Inverse() * (-_chassis.GlobalBasis.Z);
+      Vector3 localRight = _localReferenceFrame.Inverse() * _chassis.GlobalBasis.X;
+
+      var metrics = new
+      {
+        timestamp = Time.GetTicksMsec() / 1000.0f,
+        transition_progress = Mathf.Clamp(_transitionTimer / TransitionDuration, 0f, 1f),
+
+        // Consolidated Magnitudes (sqrt(x^2 + y^2 + z^2))
+        velocity_mag = _chassis.LinearVelocity.Length(),
+        ang_rate_mag = _chassis.AngularVelocity.Length(),
+        g_force_mag = accel.Length() / 9.81f,
+
+        // Flight Controller Tracking Errors & PID Outputs
+        pitch_actual = Mathf.Asin(Mathf.Clamp(localForward.Y, -1f, 1f)),
+        roll_actual = Mathf.Asin(Mathf.Clamp(-localRight.Y, -1f, 1f)),
+        vert_vel_actual = _chassis.LinearVelocity.Dot(-_gravityDir),
+
+        vert_vel_pid_out = _lastVertVelPidOut,
+        pitch_pid_out = _lastPitchPidOut,
+        roll_pid_out = _lastRollPidOut,
+        yaw_pid_out = _lastYawPidOut,
+
+        // Actuators & Powertrain
+        thrust_fl = _fl.CurrentThrust,
+        thrust_fr = _fr.CurrentThrust,
+        thrust_rl = _rl.CurrentThrust,
+        thrust_rr = _rr.CurrentThrust,
+        cmg_rpm = _cmgRPM,
+        drive_rpm = _driveRPM,
+
+        // Suspension Continuous Loads
+        susp_hit_dist_fl = _fl.HitDistance,
+        susp_hit_dist_fr = _fr.HitDistance,
+        susp_hit_dist_rl = _rl.HitDistance,
+        susp_hit_dist_rr = _rr.HitDistance,
+        slip_angle_fl = _fl.ActualSlipAngle,
+        slip_angle_fr = _fr.ActualSlipAngle,
+
+        // Environmental Topological Dynamics
+        gravity_mag = _gravityMag
+      };
+
+      try
+      {
+        string jsonString = JsonSerializer.Serialize(metrics);
+        byte[] payload = Encoding.UTF8.GetBytes(jsonString);
+        _udpClient.Send(payload, payload.Length, UdpIp, UdpPort);
+      }
+      catch (SocketException ex)
+      {
+        ReportTelemetryError($"SocketException on port {UdpPort}: {ex.Message} (Code: {ex.SocketErrorCode})");
+      }
+      catch (Exception ex)
+      {
+        ReportTelemetryError($"Unexpected telemetry serialization/transmission error: {ex.Message}");
+      }
+    }
+
+    private void ReportTelemetryError(string message)
+    {
+      float currentTime = Time.GetTicksMsec() / 1000.0f;
+      if (currentTime - _lastUdpErrorTime >= ERROR_LOG_INTERVAL_SEC)
+      {
+        GD.PrintErr($"[ROVER TELEMETRY ERROR] {message}");
+        _lastUdpErrorTime = currentTime;
+      }
     }
 
     // =============================================================================
@@ -964,17 +1122,19 @@ namespace VehicleDynamics
       float flightPowerMultiplier = Mathf.Clamp(_cmgRPM / 5000f, 0.3f, 1.2f);
       float dynamicMaxThrust = MaxMotorThrust * flightPowerMultiplier;
 
-      float altCmd = _vertVelPID.Update(targetVertVel - _chassis.LinearVelocity.Dot(-_gravityDir), 0f, dt);
-      float baseThrust = ((Mass * _gravityMag) / (4.0f * groundEffectMultiplier)) + altCmd;
+      // Evaluate PIDs ONCE and store the result directly into the telemetry cache variables
+      _lastVertVelPidOut = _vertVelPID.Update(targetVertVel - _chassis.LinearVelocity.Dot(-_gravityDir), 0f, dt);
+      float baseThrust = ((Mass * _gravityMag) / (4.0f * groundEffectMultiplier)) + _lastVertVelPidOut;
 
-      float pCmd = _pitchPID.Update(targetPitch - currentPitch, localAngVel.X, dt) * progress;
-      float rCmd = _rollPID.Update(targetRoll - currentRoll, -localAngVel.Z, dt) * progress;
-      float yCmd = _yawPID.Update(yawInput - localAngVel.Y, 0, dt) * progress;
+      _lastPitchPidOut = _pitchPID.Update(targetPitch - currentPitch, localAngVel.X, dt) * progress;
+      _lastRollPidOut  = _rollPID.Update(targetRoll - currentRoll, -localAngVel.Z, dt) * progress;
+      _lastYawPidOut   = _yawPID.Update(yawInput - localAngVel.Y, 0, dt) * progress;
 
-      _fl.CurrentThrust = _fl.IsIntact ? Mathf.Clamp(baseThrust + pCmd + rCmd + yCmd, 0, dynamicMaxThrust) : 0;
-      _fr.CurrentThrust = _fr.IsIntact ? Mathf.Clamp(baseThrust + pCmd - rCmd - yCmd, 0, dynamicMaxThrust) : 0;
-      _rl.CurrentThrust = _rl.IsIntact ? Mathf.Clamp(baseThrust - pCmd + rCmd - yCmd, 0, dynamicMaxThrust) : 0;
-      _rr.CurrentThrust = _rr.IsIntact ? Mathf.Clamp(baseThrust - pCmd - rCmd + yCmd, 0, dynamicMaxThrust) : 0;
+      // Use the cached variables to mix the motor thrusts
+      _fl.CurrentThrust = _fl.IsIntact ? Mathf.Clamp(baseThrust + _lastPitchPidOut + _lastRollPidOut + _lastYawPidOut, 0, dynamicMaxThrust) : 0;
+      _fr.CurrentThrust = _fr.IsIntact ? Mathf.Clamp(baseThrust + _lastPitchPidOut - _lastRollPidOut - _lastYawPidOut, 0, dynamicMaxThrust) : 0;
+      _rl.CurrentThrust = _rl.IsIntact ? Mathf.Clamp(baseThrust - _lastPitchPidOut + _lastRollPidOut - _lastYawPidOut, 0, dynamicMaxThrust) : 0;
+      _rr.CurrentThrust = _rr.IsIntact ? Mathf.Clamp(baseThrust - _lastPitchPidOut - _lastRollPidOut + _lastYawPidOut, 0, dynamicMaxThrust) : 0;
 
       foreach (var node in _nodes)
       {
@@ -1417,17 +1577,24 @@ namespace VehicleDynamics
       _camera.Position = new Vector3(0, 4, 12); _camera.LookAt(Vector3.Zero);
 
       var canvas = new CanvasLayer(); AddChild(canvas);
-      _hud = new Label { Position = new Vector2(20, 20), LabelSettings = new LabelSettings { FontSize = 18, FontColor = Colors.White, OutlineSize = 4, OutlineColor = Colors.Black } };
-      canvas.AddChild(_hud);
 
-      // In-World 3D Spatial Telemetry
-      _spatialTelemetry = new Label3D {
-        Text = "INITIALIZING...", PixelSize = 0.005f,
-        Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
-        Modulate = Colors.Cyan, OutlineModulate = Colors.Black,
-        Position = new Vector3(0, 1.2f, 0)
+      // Initialize as RichTextLabel for BBCode support
+      _hud = new RichTextLabel
+      {
+        Position = new Vector2(20, 20),
+        Size = new Vector2(800, 400), // RichTextLabel needs an explicit bounding box
+        BbcodeEnabled = true,
+        ScrollActive = false,
+        ClipContents = false
       };
-      _chassis.AddChild(_spatialTelemetry);
+
+      // Apply theme overrides to match your previous LabelSettings
+      _hud.AddThemeFontSizeOverride("normal_font_size", 18);
+      _hud.AddThemeColorOverride("default_color", Colors.White);
+      _hud.AddThemeColorOverride("font_outline_color", Colors.Black);
+      _hud.AddThemeConstantOverride("outline_size", 4);
+
+      canvas.AddChild(_hud);
     }
 
     private void UpdateCamera(float dt)
@@ -1470,18 +1637,28 @@ namespace VehicleDynamics
       _camera.LookAt(_chassis.GlobalPosition + _localReferenceFrame.Y * 1.0f, _localReferenceFrame.Y);
     }
 
+    // =========================================================================
+    // VISUAL DIAGNOSTICS (DISCRETE METRICS ONLY)
+    // =========================================================================
+    private string GetDamageTag(bool isIntact) => isIntact ? "[color=green]OK[/color]" : "[color=red]DMG[/color]";
+    private string GetContactTag(bool isGrounded) => isGrounded ? "[color=green]CON[/color]" : "[color=red]AIR[/color]";
+
+    // =========================================================================
+    // VISUAL DIAGNOSTICS (DISCRETE METRICS ONLY)
+    // =========================================================================
     private void UpdateHUD()
     {
-      _hud.Text = $"SYSTEM MODE: {CurrentMode} | CMG RPM: {(int)_cmgRPM} | DRIVE RPM: {(int)_driveRPM}\n" +
-        $"GRAVITY: {(_gravityMag > 9.9f ? "N-BODY" : "TOPOLOGICAL")} [{_gravityDir.X:F1}, {_gravityDir.Y:F1}, {_gravityDir.Z:F1}]\n" +
-        $"TETHER: {(_isTethered ? "LOCKED" : "STANDBY")} | FLUID DEN: {_ambientFluidDensity:F2}\n\n" +
-        $"[TAB] Mode | [F] Fire Tether | [B] CMG Brake | [1-4] Damage";
+      // Damage state logic is inverted: Intact = OK (Green), Not Intact = DMG (Red)
+      string damageState = $"FL:{GetDamageTag(_fl.IsIntact)} FR:{GetDamageTag(_fr.IsIntact)} RL:{GetDamageTag(_rl.IsIntact)} RR:{GetDamageTag(_rr.IsIntact)}";
+      string groundState = $"FL:{GetContactTag(_fl.IsGrounded)} FR:{GetContactTag(_fr.IsGrounded)} RL:{GetContactTag(_rl.IsGrounded)} RR:{GetContactTag(_rr.IsGrounded)}";
 
-      string gStatus = _gravityMag > 0.1f ? "STATIC" : "ANOMALY INFLUENCE";
-      _spatialTelemetry.Text =
-        $"SYS: {CurrentMode.ToString().ToUpper()} | CMG RPM: {(int)_cmgRPM}\n" +
-        $"VEL: {_chassis.LinearVelocity.Length():F1}m/s | GRAV: {gStatus}\n" +
-        $"PITCH PID: {_pitchPID.Kp} | ROLL PID: {_rollPID.Kp}";
+      // Requires _hud to be a RichTextLabel with BbcodeEnabled = true
+      _hud.Text = $"SYSTEM MODE: {CurrentMode}\n" +
+        $"STATUS: Tether={_isTethered} | WallRiding={_isWallRiding}\n" +
+        $"DAMAGE: {damageState}\n" +
+        $"CONTACT: {groundState}\n\n" +
+        $"[TAB] Mode | [F] Fire Tether | [B] CMG Brake | [1-4] Damage";
     }
+
   }
 }
