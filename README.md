@@ -22,7 +22,7 @@ Clone the repository and compile/run the C# solution:
 
 ```bash
 # Build C# solution and execute in Godot
-dotnet build && godot --headless --build-solutions --verbose Main.tscn
+dotnet build && godot
 ```
 
 ---
