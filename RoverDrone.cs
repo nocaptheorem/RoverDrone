@@ -986,7 +986,7 @@ namespace VehicleDynamics
         foreach (var n in _nodes)
         {
           if (n.IsIntact) {
-            n.CurrentThrust = MaxMotorThrust * 0.8f;
+            n.CurrentThrust = MaxMotorThrust * 0.02f;
             _chassis.ApplyForce(_chassis.GlobalBasis.Z * n.CurrentThrust, _chassis.GlobalBasis * n.LocalPosition);
           } else n.CurrentThrust = 0f;
         }
@@ -1187,8 +1187,8 @@ namespace VehicleDynamics
         {
           node.PlumeMesh.Visible = true;
 
-          Vector3 exhaustDir = node.IsAeroBraking ? _chassis.GlobalBasis.Z : -_chassis.GlobalBasis.Y;
-          Vector3 anchorOffset = node.IsAeroBraking ? new Vector3(0, 0, WheelRadius) : new Vector3(0, -WheelRadius, 0);
+          Vector3 exhaustDir = node.IsAeroBraking ? -_chassis.GlobalBasis.Z : -_chassis.GlobalBasis.Y;
+          Vector3 anchorOffset = node.IsAeroBraking ? new Vector3(0, 0, -WheelRadius) : new Vector3(0, -WheelRadius, 0);
           Vector3 globalAnchor = node.SteerPivot.GlobalPosition + _chassis.GlobalBasis * anchorOffset;
 
           Vector3 upRef = Mathf.Abs(exhaustDir.Dot(Vector3.Up)) > 0.99f ? Vector3.Right : Vector3.Up;
