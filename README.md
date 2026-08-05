@@ -57,50 +57,69 @@ This codebase simulates a **Relativistic Omni-Hybrid Vehicle** capable of contin
 
 ### Component 1: Topological Gravity & N-Body Superposition
 
-The net gravitational acceleration field vector $\vec{g}_{\text{net}}$ acting on the chassis mass is modeled as a non-homogeneous superposition of a local directional field (subject to surface geometry alignment) and discrete point-mass fields (Plummer spheres).
+The net gravitational acceleration field vector $\vec{g}_{\mathrm{net}}$ acting on the chassis mass is modeled as a non-homogeneous superposition of a local directional field (subject to surface geometry alignment) and discrete point-mass fields (Plummer spheres).
 
-$$\vec{g}_{\text{net}} = \vec{g}_{\text{base}} + \sum_{i} \frac{G \cdot M_i}{\Vert{}\vec{r}_i\Vert{}^2} \hat{r}_i + \frac{G \cdot M_{\text{anomaly}}}{\Vert{}\vec{r}_{\text{anomaly}}\Vert{}^2 + \epsilon^2} \hat{r}_{\text{anomaly}}$$
+$$
+\vec{g}_{\mathrm{net}} =
+\vec{g}_{\mathrm{base}} +
+\sum_{i} \frac{G \cdot M_i}{\Vert{}\vec{r}_i\Vert{}^2} \hat{r}_i +
+\frac{G \cdot M_{\mathrm{anomaly}}}{\Vert{}\vec{r}_{\mathrm{anomaly}}\Vert{}^2 +
+\epsilon^2} \hat{r}_{\mathrm{anomaly}}$$
 
 To prevent discontinuous orientation flipping within the solver, the system integrates the active gravity frame orientation via a spherical linear interpolation (Slerp) proxy across frames:
 
-$$\vec{g}_{t} = \text{Lerp}\left(\vec{g}_{t-\Delta t},\, \vec{g}_{\text{target}},\, 8.0 \cdot \Delta t\right)$$
+$$\vec{g}_{t} = \mathrm{Lerp}\left(\vec{g}_{t-\Delta t},\, \vec{g}_{\mathrm{target}},\, 8.0 \cdot \Delta t\right)$$
 
 ### Component 2: Volumetric Fluid Dynamics (Non-Newtonian Drag)
 
 The atmospheric vehicle drag model departs from a static coefficient by continuously computing a profile area projection based on the velocity vector's orientation relative to the chassis alignment.
 
-$$F_{\text{drag}} = \frac{1}{2} \rho_{\text{fluid}} \cdot \Vert{}\vec{v}\Vert{}^2 \cdot C_d \cdot A_{\text{dynamic}}$$
+$$F_{\mathrm{drag}} = \frac{1}{2} \rho_{\mathrm{fluid}} \cdot \Vert{}\vec{v}\Vert{}^2 \cdot C_d \cdot A_{\mathrm{dynamic}}$$
 
 The cross-sectional reference area updates based on flight pitch or skid angles:
 
-$$A_{\text{dynamic}} = \text{Lerp}\left(W_{\text{track}} \cdot 0.4,\, W_{\text{track}} \cdot L_{\text{wheelbase}},\, \left\vert{}\hat{y}_{\text{chassis}} \cdot \hat{v}\right\vert{}\right)$$
+$$
+A_{\mathrm{dynamic}} = \mathrm{Lerp}\left(W_{\mathrm{track}} \cdot 0.4,\, W_{\mathrm{track}} \cdot L_{\mathrm{wheelbase}},\,
+\left\vert{}\hat{y}_{\mathrm{chassis}}
+\cdot \hat{v}\right\vert{}\right)$$
 
 ### Component 3: Non-Linear Progressive Suspension
 
-Each intact wheel calculates a restoring vertical force $F_{\text{suspension}}$ that is non-linear, introducing a cubic spring rate alongside a linear velocity-damping term:
+Each intact wheel calculates a restoring vertical force $F_{\mathrm{suspension}}$ that is non-linear, introducing a cubic spring rate alongside a linear velocity-damping term:
 
-$$F_{\text{suspension}} = \max\left(0,\, \left(x \cdot k_{\text{base}} + x^3 \cdot k_{\text{progressive}} + \dot{x} \cdot c\right) \cdot (1 - \gamma)\right)$$
+$$
+F_{\mathrm{suspension}} =
+\max\left(0,\, \left(x \cdot k_{\mathrm{base}} +
+x^3 \cdot k_{\mathrm{progressive}} + \dot{x} \cdot c\right) \cdot (1 - \gamma)\right)
+$$
 
 Where $\gamma \in [0, 1]$ represents the state transition progress variable from Car to Drone. Lateral grip relies on a simplified Pacejka magic formula to determine traction slip angles and apply appropriate restorative lateral forces.
 
 ### Component 4: Sub-Stepped Tensile Grappling Mechanics
 
-When the tether lock activates, the system solves the high-stiffness spring equation using an internal loop with a smaller time step $\Delta t_{\text{sub}} = \frac{\Delta t}{10}$ to prevent numerical explosion.
+When the tether lock activates, the system solves the high-stiffness spring equation using an internal loop with a smaller time step $\Delta t_{\mathrm{sub}} = \frac{\Delta t}{10}$ to prevent numerical explosion.
 
-$$\text{For } i = 0 \rightarrow 9: \quad \vec{r} = \vec{x}_{\text{sim}} - \vec{x}_{\text{anchor}}$$
+$$\mathrm{For i = 0 \rightarrow 9}:   \quad \vec{r} = \vec{x}_{\mathrm{sim}} - \vec{x}_{\mathrm{anchor}}$$
 
-$$\vec{F}_{\text{tether}} = \begin{cases} \vec{0} & \text{if } \Vert{}\vec{r}\Vert{} \le L_{\text{rest}} \\ -k_{\text{tether}} \left(\Vert{}\vec{r}\Vert{} - L_{\text{rest}}\right)\hat{r} - c_{\text{tether}}\left(\vec{v}_{\text{sim}} \cdot \hat{r}\right)\hat{r} & \text{if } \Vert{}\vec{r}\Vert{} > L_{\text{rest}} \end{cases}$$
+$$
+\vec{F}_{\mathrm{tether}} =
+\begin{cases} \vec{0} & \mathrm{if } \Vert{}\vec{r}\Vert{} \le L_{\mathrm{rest}} \\ -k_{\mathrm{tether}} \left(\Vert{}\vec{r}\Vert{} -
+L_{\mathrm{rest}}\right)\hat{r} -
+c_{\mathrm{tether}}\left(\vec{v}_{\mathrm{sim}} \cdot \hat{r}\right)\hat{r} & \mathrm{if } \Vert{}\vec{r}\Vert{} >
+L_{\mathrm{rest}} \end{cases}$$
 
 ### Component 5: Gyroscopic Precession & Control Moment Gyroscopes (CMG)
 
-The four rotor bodies act as angular momentum storage units. Spinning rotors create an implicit angular momentum vector $\vec{L}_{\text{rotors}}$.
+The four rotor bodies act as angular momentum storage units. Spinning rotors create an implicit angular momentum vector $\vec{L}_{\mathrm{rotors}}$.
 
-$$\vec{L}_{\text{rotors}} = \sum_{n=1}^{4} I_{\text{rotor}} \cdot \omega_n \cdot \hat{y}_{\text{chassis}}$$
+$$\vec{L}_{\mathrm{rotors}} = \sum_{n=1}^{4} I_{\mathrm{rotor}} \cdot \omega_n \cdot \hat{y}_{\mathrm{chassis}}$$
 
 When the vehicle undergoes global rigid body angular rotation, it experiences a gyroscopic precession torque. During a CMG braking event, momentum is transferred directly into the chassis by exponentially reducing the rotor angular velocities:
 
-$$\vec{\tau}_{\text{impulse}} = \Delta \vec{L}_{\text{rotors}} = \sum_{n=1}^{4} I_{\text{rotor}} \left(\omega_{n,\,\text{initial}} - \omega_{n,\,\text{target}}\right)\hat{y}_{\text{chassis}}$$
-
+$$\vec{\tau}_{\mathrm{impulse}} =
+\Delta \vec{L}_{\mathrm{rotors}} =
+\sum_{n=1}^{4} I_{\mathrm{rotor}} \left(\omega_{n,\,\mathrm{initial}} -
+\omega_{n,\,\mathrm{target}}\right)\hat{y}_{\mathrm{chassis}}$$
 ---
 
 ## 3. Control Loop & Multi-Mode Execution
@@ -136,7 +155,7 @@ The system uses four standalone integral-bounded PID controllers to calculate st
      [Fl Motor]  [Fr Motor]      [Rl Motor]  [Rr Motor]
 ```
 
-The system mixes these control signals across the four motor channels utilizing an explicitly clamped allocation formulation mapping $F_{\text{base}}$, $\tau_{\text{pitch}}$, $\tau_{\text{roll}}$, and $\tau_{\text{yaw}}$.
+The system mixes these control signals across the four motor channels utilizing an explicitly clamped allocation formulation mapping $F_{\mathrm{base}}$, $\tau_{\mathrm{pitch}}$, $\tau_{\mathrm{roll}}$, and $\tau_{\mathrm{yaw}}$.
 
 ---
 
@@ -164,12 +183,12 @@ The system mixes these control signals across the four motor channels utilizing 
 ### Extreme Stress Tests & Edge Cases
 
 #### 1. Kinetic Wall Riding under Gravitational Shift
-* **Action:** Accelerate to $> 18.0\,\text{m/s}$ in Car mode and drive into the quarter-pipe structure or vertical wall segments.
-* **What Happens:** Structural speed combined with surface normal alignment triggers a base gravity mutation ($\vec{g}_{\text{base}}$ shifts to $-\hat{n} \cdot 9.81\,\text{m/s}^2$). The vehicle will adhere to the wall dynamically. Slowing down below $10.0\,\text{m/s}$ causes instantaneous loss of adhesion and chaotic tumbling as gravity normalizes.
+* **Action:** Accelerate to $> 18.0\,\mathrm{m/s}$ in Car mode and drive into the quarter-pipe structure or vertical wall segments.
+* **What Happens:** Structural speed combined with surface normal alignment triggers a base gravity mutation ($\vec{g}_{\mathrm{base}}$ shifts to $-\hat{n} \cdot 9.81\,\mathrm{m/s}^2$). The vehicle will adhere to the wall dynamically. Slowing down below $10.0\,\mathrm{m/s}$ causes instantaneous loss of adhesion and chaotic tumbling as gravity normalizes.
 
 #### 2. N-Body Orbital Capture
 * **Action:** Fly the Drone mode near the Gravitational Anomaly (purple sphere) floating in the level.
-* **What Happens:** The $N$-Body superposition applies severe gravitational forces scaled by inverse distance squared. At $<50.0\,\text{m}$, the anomaly's warping influence lerps the core gravitational vector toward the singularity, forcing the drone's PID controllers to stabilize relative to a shifting "Down" vector, creating an orbital horizon effect.
+* **What Happens:** The $N$-Body superposition applies severe gravitational forces scaled by inverse distance squared. At $<50.0\,\mathrm{m}$, the anomaly's warping influence lerps the core gravitational vector toward the singularity, forcing the drone's PID controllers to stabilize relative to a shifting "Down" vector, creating an orbital horizon effect.
 
 #### 3. High-Velocity CMG Braking (The "B" Key)
 * **Action:** In Drone mode, reach maximum angular velocity and RPM ($> 8000$), then suddenly initiate a sharp turn and press `B`.
